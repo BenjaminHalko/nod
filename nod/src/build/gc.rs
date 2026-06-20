@@ -194,7 +194,10 @@ impl GCPartitionLayout {
                     )));
                 }
                 self.disc_header.as_mut_bytes().copy_from_slice(&data[..size_of::<DiscHeader>()]);
-                self.boot_header.as_mut_bytes().copy_from_slice(&data[size_of::<DiscHeader>()..]);
+                self.boot_header
+                    .as_mut_bytes()
+                    .copy_from_slice(&data[BB2_OFFSET..BB2_OFFSET + size_of::<BootHeader>()]);
+
                 *handled = true;
                 continue;
             }
@@ -278,6 +281,7 @@ impl GCPartitionLayout {
             }
             let len = game_title.len().min(max_size);
             self.disc_header.game_title[..len].copy_from_slice(&game_title.as_bytes()[..len]);
+            self.disc_header.game_title[len..].fill(0);
         }
         if let Some(disc_num) = overrides.disc_num {
             self.disc_header.disc_num = disc_num;
@@ -407,15 +411,10 @@ impl GCPartitionLayout {
         //     return Err(Error::Other("FST not set".to_string()));
         // };
 
-        let mut boot = <[u8]>::new_box_zeroed_with_elems(BOOT_SIZE)?;
-        boot[..size_of::<DiscHeader>()].copy_from_slice(self.disc_header.as_bytes());
-        boot[BB2_OFFSET..BB2_OFFSET + size_of::<BootHeader>()]
-            .copy_from_slice(self.boot_header.as_bytes());
-        write_info.push(WriteInfo {
-            kind: WriteKind::Static(Arc::from(boot), "[BOOT]"),
-            size: BOOT_SIZE as u64,
-            offset: last_offset,
-        });
+        // Reserve space in write_info for the boot block — we fill it in after all header
+        // mutations below so the snapshot reflects the final offsets/sizes.
+        let boot_write_info_idx = write_info.len();
+        write_info.push(WriteInfo { kind: WriteKind::Junk, size: BOOT_SIZE as u64, offset: 0 }); // placeholder
         last_offset += BOOT_SIZE as u64;
         write_info.push(WriteInfo {
             kind: WriteKind::Static(Arc::from(raw_bi2.as_ref()), "[BI2]"),
@@ -448,6 +447,17 @@ impl GCPartitionLayout {
         if self.boot_header.fst_max_size(is_wii) < fst_size {
             self.boot_header.set_fst_max_size(fst_size, is_wii);
         }
+
+        // Now snapshot the fully-updated boot block.
+        let mut boot = <[u8]>::new_box_zeroed_with_elems(BOOT_SIZE)?;
+        boot[..size_of::<DiscHeader>()].copy_from_slice(self.disc_header.as_bytes());
+        boot[BB2_OFFSET..BB2_OFFSET + size_of::<BootHeader>()]
+            .copy_from_slice(self.boot_header.as_bytes());
+        write_info[boot_write_info_idx] = WriteInfo {
+            kind: WriteKind::Static(Arc::from(boot), "[BOOT]"),
+            size: BOOT_SIZE as u64,
+            offset: 0,
+        };
 
         if dol_offset < fst_offset {
             write_info.push(WriteInfo {
