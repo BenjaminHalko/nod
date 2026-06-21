@@ -24,7 +24,7 @@ use crate::{
         },
     },
     read::{CloneableStream, DiscStream, NonCloneableStream},
-    util::{aes::encrypt_sector, digest::sha1_hash},
+    util::aes::encrypt_sector,
 };
 
 const PARTITION_START: u64 = 0x50000;
@@ -145,7 +145,7 @@ impl WiiPartitionWriter {
 
     fn prepare_stream<Cb>(self, file_callback: Cb) -> Result<(WiiDiscMeta, GCPartitionStream<Cb>)>
     where Cb: FileCallback {
-        let Self { gc_writer, mut ticket, mut tmd, cert_chain, title_key, region } = self;
+        let Self { gc_writer, ticket, tmd, cert_chain, title_key, region } = self;
         let mut gc_stream = gc_writer.into_gc_stream(file_callback);
         let gc_data_size = gc_stream.len();
         let num_sectors =
@@ -184,10 +184,11 @@ impl WiiPartitionWriter {
         }
 
         let encrypted_data_size = num_sectors as u64 * SECTOR_SIZE as u64;
-        zero_signature(&mut ticket);
-        zero_signature(&mut tmd);
-        update_tmd_content_hash(&mut tmd, encrypted_data_size, &h3_table)?;
-
+        // For a 1:1 reconstruction the caller-provided ticket and TMD are passed through
+        // verbatim. The original RSA signature (bytes 0x4..0x104) and the TMD content metadata
+        // (data size at 0x1EC, H3 hash at 0x1F4) already match the rebuilt encrypted data, since
+        // an identical H3 table is regenerated above. Mutating them here would diverge from the
+        // source disc.
         let outer_area = build_outer_area(&mut gc_stream, &region)?;
         let partition_header =
             build_partition_header(&ticket, &tmd, &cert_chain, &h3_table, encrypted_data_size)?;
@@ -387,7 +388,7 @@ fn build_partition_header(
         return Err(Error::Other("Invalid H3 table size".to_string()));
     }
 
-    let cert_offset = align_up(TMD_PART_OFFSET + tmd.len() as u64, 0x40);
+    let cert_offset = align_up(TMD_PART_OFFSET + tmd.len() as u64, 0x20);
     let cert_end = cert_offset + cert_chain.len() as u64;
     if cert_end > H3_TABLE_PART_OFFSET {
         return Err(Error::Other("TMD and cert chain overlap the H3 table".to_string()));
@@ -429,29 +430,6 @@ fn build_partition_header(
     );
 
     Ok(partition_header)
-}
-
-fn zero_signature(blob: &mut Vec<u8>) {
-    if blob.len() >= 0x104 {
-        blob[0x004..0x104].fill(0);
-    }
-}
-
-fn update_tmd_content_hash(
-    tmd: &mut Vec<u8>,
-    encrypted_data_size: u64,
-    h3_table: &[u8],
-) -> Result<()> {
-    const SIZE_OFFSET: usize = 0x1EC;
-    const HASH_OFFSET: usize = 0x1F4;
-
-    if tmd.len() < HASH_OFFSET + 20 {
-        return Err(Error::Other("TMD is too small to contain content metadata".to_string()));
-    }
-
-    tmd[SIZE_OFFSET..SIZE_OFFSET + 8].copy_from_slice(&encrypted_data_size.to_be_bytes());
-    tmd[HASH_OFFSET..HASH_OFFSET + 20].copy_from_slice(&sha1_hash(h3_table));
-    Ok(())
 }
 
 fn align_up(value: u64, alignment: u64) -> u64 {
