@@ -1,4 +1,4 @@
-#![allow(missing_docs, unused)] // TODO
+#![allow(missing_docs)] // TODO
 use std::{
     io,
     io::{Read, Seek, SeekFrom, Write},
@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use zerocopy::{FromBytes, IntoBytes};
+use zerocopy::FromBytes;
 
 use super::gc::{
     FileCallback, FileInfo, GCPartitionBuilder, GCPartitionStream, GCPartitionWriter,
@@ -16,12 +16,9 @@ use crate::{
     Error, Result, ResultContext,
     common::KeyBytes,
     disc::{
-        BB2_OFFSET, BOOT_SIZE, BootHeader, DiscHeader, SECTOR_GROUP_SIZE, SECTOR_SIZE,
+        BOOT_SIZE, BootHeader, DiscHeader, SECTOR_GROUP_SIZE, SECTOR_SIZE,
         hashes::hash_sector_group,
-        wii::{
-            H3_TABLE_SIZE, HASHES_SIZE, REGION_OFFSET, REGION_SIZE, SECTOR_DATA_SIZE, Ticket,
-            WiiPartEntry, WiiPartGroup,
-        },
+        wii::{H3_TABLE_SIZE, HASHES_SIZE, REGION_OFFSET, REGION_SIZE, SECTOR_DATA_SIZE, Ticket},
     },
     read::{CloneableStream, DiscStream, NonCloneableStream},
     util::aes::encrypt_sector,
@@ -170,25 +167,19 @@ impl WiiPartitionWriter {
                 &mut group_buf,
             )
             .with_context(|| format!("Building plaintext sector group {group_idx}"))?;
-            // Zero groups (gap sectors between files) produce a zero H3 entry.
-            // The TMD content hash is updated to match the full h3_table afterward.
-            if group_buf.iter().any(|&b| b != 0) {
-                let group_slice: &[u8; SECTOR_GROUP_SIZE] = group_buf
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| Error::Other("Sector group buffer size mismatch".to_string()))?;
-                let hashes = hash_sector_group(group_slice, true);
-                let h3_offset = group_idx as usize * 20;
-                h3_table[h3_offset..h3_offset + 20].copy_from_slice(&hashes.h3_hash);
-            }
+            // Every group is hashed, including all-zero gap groups: the disc still stores
+            // the H0/H1/H2 hash tables (and encrypts them) for zero-plaintext groups, so the
+            // H3 entry is the hash of those tables, not zero.
+            let group_slice: &[u8; SECTOR_GROUP_SIZE] = group_buf
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::Other("Sector group buffer size mismatch".to_string()))?;
+            let hashes = hash_sector_group(group_slice, true);
+            let h3_offset = group_idx as usize * 20;
+            h3_table[h3_offset..h3_offset + 20].copy_from_slice(&hashes.h3_hash);
         }
 
         let encrypted_data_size = num_sectors as u64 * SECTOR_SIZE as u64;
-        // For a 1:1 reconstruction the caller-provided ticket and TMD are passed through
-        // verbatim. The original RSA signature (bytes 0x4..0x104) and the TMD content metadata
-        // (data size at 0x1EC, H3 hash at 0x1F4) already match the rebuilt encrypted data, since
-        // an identical H3 table is regenerated above. Mutating them here would diverge from the
-        // source disc.
         let outer_area = build_outer_area(&mut gc_stream, &region)?;
         let partition_header =
             build_partition_header(&ticket, &tmd, &cert_chain, &h3_table, encrypted_data_size)?;
@@ -233,10 +224,6 @@ where Cb: FileCallback
             sectors_in_group,
             &mut group_buf,
         )?;
-
-        if group_buf.iter().all(|&b| b == 0) {
-            return Ok(group_buf.into_boxed_slice());
-        }
 
         let hashes = {
             let sector_group: &[u8; SECTOR_GROUP_SIZE] = group_buf
