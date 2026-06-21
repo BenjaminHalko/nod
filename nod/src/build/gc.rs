@@ -139,8 +139,9 @@ impl GCPartitionBuilder {
         layout.locate_sys_files(sys_file_callback)?;
         layout.apply_overrides(&self.overrides)?;
         let write_info = layout.layout_files()?;
+        let is_wii = layout.disc_header.is_wii();
         let disc_size =
-            layout.boot_header.user_offset.get() as u64 + layout.boot_header.user_size.get() as u64;
+            layout.boot_header.user_offset(is_wii) + layout.boot_header.user_size(is_wii);
         let junk_id = layout.junk_id();
         Ok(GCPartitionWriter::new(write_info, disc_size, junk_id, self.disc_header.disc_num))
     }
@@ -478,15 +479,16 @@ impl GCPartitionLayout {
     }
 
     fn layout_files(&mut self) -> Result<Vec<WriteInfo>> {
+        let is_wii = self.disc_header.is_wii();
         let mut system_write_info = Vec::new();
         let mut write_info = Vec::with_capacity(self.user_files.len());
         let mut last_offset = self.layout_system_data(&mut system_write_info)?;
 
         // Layout user data
-        let mut user_offset = self.boot_header.user_offset.get() as u64;
+        let mut user_offset = self.boot_header.user_offset(is_wii);
         if user_offset == 0 {
             user_offset = last_offset.align_up(SECTOR_SIZE as u64);
-            self.boot_header.user_offset.set(user_offset as u32);
+            self.boot_header.set_user_offset(user_offset, is_wii);
         } else if user_offset < last_offset {
             return Err(Error::Other(format!(
                 "User offset {:#X} is before FST {:#X}",
@@ -507,7 +509,6 @@ impl GCPartitionLayout {
         }
 
         // Generate FST from only user files
-        let is_wii = self.disc_header.is_wii();
         let fst_data = self.generate_fst(&write_info)?;
         let fst_size = fst_data.len() as u64;
         write_info.push(WriteInfo {
@@ -521,13 +522,13 @@ impl GCPartitionLayout {
         sort_files(&mut write_info)?;
 
         // Update user size if not set
-        if self.boot_header.user_size.get() == 0 {
-            let user_end = if self.disc_header.is_wii() {
+        if self.boot_header.user_size(is_wii) == 0 {
+            let user_end = if is_wii {
                 last_offset.align_up(SECTOR_SIZE as u64)
             } else {
                 MINI_DVD_SIZE
             };
-            self.boot_header.user_size.set((user_end - user_offset) as u32);
+            self.boot_header.set_user_size(user_end - user_offset, is_wii);
         }
 
         // Insert junk data
@@ -575,7 +576,7 @@ pub(crate) fn insert_junk_data(
         new_write_info.push(info);
     }
     let aligned_end = gcm_align(last_file_end);
-    let user_end = boot_header.user_offset.get() as u64 + boot_header.user_size.get() as u64;
+    let user_end = boot_header.user_offset(is_wii) + boot_header.user_size(is_wii);
     if aligned_end < user_end && aligned_end >= fst_end {
         new_write_info.push(WriteInfo {
             kind: WriteKind::Junk,
